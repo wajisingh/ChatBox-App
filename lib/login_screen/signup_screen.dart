@@ -18,20 +18,18 @@ class _SignupScreenState extends State<SignupScreen> {
   final _confirmPasswordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
 
+  late AuthProvider _authProvider; // Add this line
+
   @override
-  void initState() {
-    super.initState();
-    // Listen to auth state changes
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final authProvider = Provider.of<AuthProvider>(context, listen: false);
-      authProvider.addListener(_authStateListener);
-    });
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _authProvider = Provider.of<AuthProvider>(context, listen: false);
+    _authProvider.addListener(_authStateListener);
   }
 
   @override
   void dispose() {
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-    authProvider.removeListener(_authStateListener);
+    _authProvider.removeListener(_authStateListener);
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
@@ -40,11 +38,7 @@ class _SignupScreenState extends State<SignupScreen> {
   }
 
   void _authStateListener() {
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-
-    // Navigate to home screen when successfully authenticated
-    if (authProvider.isAuthenticated && mounted) {
-      // Show success message
+    if (_authProvider.isAuthenticated && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text("Account created successfully!"),
@@ -62,27 +56,25 @@ class _SignupScreenState extends State<SignupScreen> {
   Future<void> _signUp() async {
     if (!_formKey.currentState!.validate()) return;
 
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
+    _authProvider.clearError();
 
-    // Clear any previous errors
-    authProvider.clearError();
-
-    final success = await authProvider.signUp(
+    final success = await _authProvider.signUp(
       name: _nameController.text.trim(),
       email: _emailController.text.trim(),
       password: _passwordController.text.trim(),
     );
 
     if (!success && mounted) {
-      // Show error message using SnackBar
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(authProvider.errorMessage ?? "Signup failed"),
+          content: Text(_authProvider.errorMessage ?? "Signup failed"),
           backgroundColor: Colors.red,
         ),
       );
     }
   }
+
+
 
   @override
   Widget build(BuildContext context) {

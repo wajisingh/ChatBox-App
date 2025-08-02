@@ -9,12 +9,14 @@ import '../provider/user_provider.dart';
 class HomeScreen2 extends StatefulWidget {
   final String peerId;
   final String peerName;
+  final bool isGroupChat; // Add this parameter
 
   const HomeScreen2({
-    super.key,
+    Key? key,
     required this.peerId,
     required this.peerName,
-  });
+    this.isGroupChat = false, // Default to false
+  }) : super(key: key);
 
   @override
   State<HomeScreen2> createState() => _HomeScreen2State();
@@ -53,11 +55,16 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
 
     if (authProvider.currentUser != null) {
       try {
-        // Create conversation ID
-        _conversationId = _getConversationId(authProvider.currentUser!.id, widget.peerId);
-
-        // Load peer user data
-        _peerUser = await userProvider.getUserById(widget.peerId);
+        // Use different logic for group vs 1-on-1 chat
+        if (widget.isGroupChat) {
+          // For group chat, use the peerId directly as conversation ID
+          _conversationId = widget.peerId; // This should be 'ii_group'
+        } else {
+          // For 1-on-1 chat, create conversation ID
+          _conversationId = _getConversationId(authProvider.currentUser!.id, widget.peerId);
+          // Load peer user data for 1-on-1 chat
+          _peerUser = await userProvider.getUserById(widget.peerId);
+        }
 
         // Create the conversation document if it doesn't exist
         await _ensureConversationExists();
@@ -81,7 +88,6 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
       }
     }
   }
-
   String _getConversationId(String userId1, String userId2) {
     return userId1.compareTo(userId2) < 0
         ? '${userId1}_$userId2'
@@ -98,17 +104,86 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
     try {
       final doc = await _firestore.collection('conversations').doc(_conversationId).get();
 
-      if (!doc.exists) {
-        // Create the conversation document
+      if (!doc.exists && !widget.isGroupChat) {
+        // Only create conversation for 1-on-1 chats
+        // Groups should already exist
         await _firestore.collection('conversations').doc(_conversationId).set({
           'participantIds': [authProvider.currentUser!.id, widget.peerId],
           'createdAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
+          'isGroup': false,
         });
         print('Created conversation: $_conversationId');
       }
     } catch (e) {
       print('Error ensuring conversation exists: $e');
+    }
+  }
+  void _showDeleteGroupDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Delete Group'),
+          content: Text('Are you sure you want to delete "${widget.peerName}"? This action cannot be undone and will remove all messages.'),
+          actions: [
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+            TextButton(
+              child: const Text('Delete', style: TextStyle(color: Colors.red)),
+              onPressed: () {
+                Navigator.of(context).pop();
+                _deleteGroup();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _deleteGroup() async {
+    if (_conversationId == null || !widget.isGroupChat) return;
+
+    try {
+      // Delete all messages first
+      final messages = await _firestore
+          .collection('conversations')
+          .doc(_conversationId)
+          .collection('messages')
+          .get();
+
+      final batch = _firestore.batch();
+      for (var doc in messages.docs) {
+        batch.delete(doc.reference);
+      }
+
+      // Delete the group conversation
+      batch.delete(_firestore.collection('conversations').doc(_conversationId));
+
+      await batch.commit();
+
+      if (mounted) {
+        // Go back to home screen
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Group deleted successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting group: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -129,7 +204,7 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
       final message = Message(
         id: '',
         senderId: authProvider.currentUser!.id,
-        receiverId: widget.peerId,
+        receiverId: widget.isGroupChat ? '' : widget.peerId, // Empty for groups
         message: messageText,
         timestamp: Timestamp.now(),
         isRead: false,
@@ -302,10 +377,13 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
                               ? NetworkImage(peerUser!.profilePictureUrl!)
                               : null,
                           child: peerUser?.profilePictureUrl == null
-                              ? const Icon(Icons.person, color: Colors.white)
+                              ? Icon(
+                            widget.isGroupChat ? Icons.group : Icons.person,
+                            color: Colors.white,
+                          )
                               : null,
                         ),
-                        if (isOnline)
+                        if (isOnline && !widget.isGroupChat)
                           Positioned(
                             bottom: 0,
                             right: 0,
@@ -335,7 +413,7 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
                           ),
                         ),
                         Text(
-                          lastSeen,
+                          widget.isGroupChat ? 'Group Chat' : lastSeen,
                           style: TextStyle(
                             color: Colors.white.withOpacity(0.8),
                             fontSize: 14,
@@ -356,6 +434,11 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
                     break;
                   case 'refresh':
                     setState(() {}); // Refresh the screen
+                    break;
+                  case 'delete':
+                    if (widget.isGroupChat) {
+                      _showDeleteGroupDialog();
+                    }
                     break;
                 }
               },
@@ -381,6 +464,18 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
                       ],
                     ),
                   ),
+                  // Add delete group option for group chats only
+                  if (widget.isGroupChat)
+                    const PopupMenuItem<String>(
+                      value: 'delete',
+                      child: Row(
+                        children: [
+                          Icon(Icons.delete_forever, size: 20, color: Colors.red),
+                          SizedBox(width: 8),
+                          Text('Delete Group', style: TextStyle(color: Colors.red)),
+                        ],
+                      ),
+                    ),
                 ];
               },
             ),
@@ -531,6 +626,11 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
   }
 
   Widget _buildReceivedMessage(Message message) {
+    // Get sender's name initial
+    String senderInitial = message.senderName != null && message.senderName!.isNotEmpty
+        ? message.senderName![0].toUpperCase()
+        : 'U';
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -538,7 +638,7 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
           radius: 18,
           backgroundColor: const Color(0xFFAD87E4),
           child: Text(
-            widget.peerName.isNotEmpty ? widget.peerName[0].toUpperCase() : 'U',
+            senderInitial, // Use sender's initial instead of peer name
             style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
           ),
         ),
@@ -547,6 +647,19 @@ class _HomeScreen2State extends State<HomeScreen2> with WidgetsBindingObserver {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Show sender name for group chats
+              if (widget.isGroupChat && message.senderName != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    message.senderName!,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: const BoxDecoration(

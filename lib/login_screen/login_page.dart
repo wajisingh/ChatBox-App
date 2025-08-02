@@ -13,28 +13,34 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _formKey = GlobalKey<FormState>();
+final _emailController = TextEditingController();
+final _passwordController = TextEditingController();
+final _formKey = GlobalKey<FormState>();
 
-  @override
-  void initState() {
-    super.initState();
-    // Listen to auth state changes
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final authProvider = Provider.of<AuthProvider>(context, listen: false);
-      authProvider.addListener(_authStateListener);
-    });
-  }
+late AuthProvider _authProvider;
 
-  @override
-  void dispose() {
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-    authProvider.removeListener(_authStateListener);
-    _emailController.dispose();
-    _passwordController.dispose();
-    super.dispose();
-  }
+@override
+void didChangeDependencies() {
+  super.didChangeDependencies();
+  _authProvider = Provider.of<AuthProvider>(context, listen: false);
+}
+
+@override
+void initState() {
+  super.initState();
+  // Delay adding listener to ensure context is available
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _authProvider.addListener(_authStateListener);
+  });
+}
+
+@override
+void dispose() {
+  _authProvider.removeListener(_authStateListener);
+  _emailController.dispose();
+  _passwordController.dispose();
+  super.dispose();
+}
 
   void _authStateListener() {
     final authProvider = Provider.of<AuthProvider>(context, listen: false);

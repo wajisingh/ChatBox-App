@@ -7,6 +7,8 @@ import '../provider/auth_provider.dart';
 import '../provider/chat_provider.dart';
 import '../provider/user_provider.dart';
 import '../models/user.dart';
+import '../models/chat_conversation.dart';
+import 'group_chat_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -15,13 +17,16 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  late TabController _tabController;
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+
     // Load users when screen initializes
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final authProvider = Provider.of<AuthProvider>(context, listen: false);
@@ -40,7 +45,30 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (context) => HomeScreen2(
           peerId: peerId,
           peerName: peerName,
+          isGroupChat: false,
         ),
+      ),
+    );
+  }
+
+  void _openGroupChatScreen(BuildContext context, ChatConversation group) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => HomeScreen2(
+          peerId: group.id,
+          peerName: group.groupName ?? 'Group Chat',
+          isGroupChat: true,
+        ),
+      ),
+    );
+  }
+
+  void _createNewGroup() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const CreateGroupScreen(),
       ),
     );
   }
@@ -112,6 +140,23 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  // Get group chats for current user
+  Stream<List<ChatConversation>> _getGroupChats(String currentUserId) {
+    return FirebaseFirestore.instance
+        .collection('conversations')
+        .where('participantIds', arrayContains: currentUserId)
+        .where('isGroup', isEqualTo: true)
+        .snapshots()
+        .map((snapshot) {
+      print('Found ${snapshot.docs.length} groups'); // Debug
+      return snapshot.docs
+          .map((doc) => ChatConversation.fromFirestore(doc))
+          .toList()
+        ..sort((a, b) => (b.updatedAt ?? b.createdAt ?? Timestamp.now())
+            .compareTo(a.updatedAt ?? a.createdAt ?? Timestamp.now()));
+    });
+  }
+
   String _formatLastMessageTime(Timestamp? timestamp) {
     if (timestamp == null) return '';
 
@@ -139,6 +184,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _searchController.dispose();
+    _tabController.dispose();
     super.dispose();
   }
 
@@ -159,10 +205,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
             return Column(
               children: [
-                // Header Container
+                // Header Container with TabBar
                 Container(
                   width: double.infinity,
-                  height: 155,
+                  height: 200,
                   decoration: const BoxDecoration(
                     color: Color(0xff7B3FD3),
                     borderRadius: BorderRadius.only(
@@ -276,320 +322,572 @@ class _HomeScreenState extends State<HomeScreen> {
                               },
                               decoration: const InputDecoration(
                                 border: InputBorder.none,
-                                labelText: "Search users...",
+                                labelText: "Search users or groups...",
                                 prefixIcon: Icon(Icons.search),
                               ),
                             ),
                           ),
                         ),
                       ),
+                      // TabBar
+                      TabBar(
+                        controller: _tabController,
+                        indicatorColor: Colors.white,
+                        indicatorWeight: 3,
+                        labelColor: Colors.white,
+                        unselectedLabelColor: Colors.white70,
+                        tabs: const [
+                          Tab(text: 'Chats'),
+                          Tab(text: 'Groups'),
+                        ],
+                      ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 20),
 
-                // Users List
+                // TabBarView
                 Expanded(
-                  child: StreamBuilder<List<User>>(
-                    stream: userProvider.getUsersStream(excludeUserId: currentUser.id),
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState == ConnectionState.waiting) {
-                        return const Center(
-                          child: CircularProgressIndicator(
-                            color: Color(0xff7B3FD3),
-                          ),
-                        );
-                      }
-
-                      if (snapshot.hasError) {
-                        return Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.error_outline, size: 64, color: Colors.grey[400]),
-                              const SizedBox(height: 16),
-                              Text(
-                                'Error loading users',
-                                style: TextStyle(fontSize: 16, color: Colors.grey[600]),
-                              ),
-                              const SizedBox(height: 8),
-                              ElevatedButton(
-                                onPressed: () => userProvider.refreshUsers(excludeUserId: currentUser.id),
-                                child: const Text('Retry'),
-                              ),
-                            ],
-                          ),
-                        );
-                      }
-
-                      if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                        return const Center(
-                          child: Text(
-                            'No other users found.\nSign up more accounts to see them here!',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 16, color: Colors.grey),
-                          ),
-                        );
-                      }
-
-                      // Filter users based on search query
-                      final users = _searchQuery.isEmpty
-                          ? snapshot.data!
-                          : snapshot.data!.where((user) {
-                        final userName = user.name.toLowerCase();
-                        final userEmail = user.email.toLowerCase();
-                        return userName.contains(_searchQuery) || userEmail.contains(_searchQuery);
-                      }).toList();
-
-                      if (users.isEmpty) {
-                        return Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.search_off, size: 64, color: Colors.grey[400]),
-                              const SizedBox(height: 16),
-                              Text(
-                                'No users found for "$_searchQuery"',
-                                style: TextStyle(fontSize: 16, color: Colors.grey[600]),
-                              ),
-                            ],
-                          ),
-                        );
-                      }
-
-                      return ListView.builder(
-                        itemCount: users.length,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        itemBuilder: (context, index) {
-                          final user = users[index];
-
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: StreamBuilder<Map<String, dynamic>?>(
-                              stream: _getLastMessage(user.id, currentUser.id),
-                              builder: (context, lastMessageSnapshot) {
-                                final lastMessageData = lastMessageSnapshot.data;
-                                final lastMessage = lastMessageData?['lastMessage'] as String? ?? '';
-                                final lastMessageTime = lastMessageData?['lastMessageTime'] as Timestamp?;
-                                final lastMessageSender = lastMessageData?['lastMessageSender'] as String?;
-                                final isLastMessageFromPeer = lastMessageSender == user.id;
-
-                                return StreamBuilder<int>(
-                                  stream: _getUnreadCount(user.id, currentUser.id),
-                                  builder: (context, unreadSnapshot) {
-                                    final unreadCount = unreadSnapshot.data ?? 0;
-                                    final hasUnreadMessages = unreadCount > 0;
-
-                                    return GestureDetector(
-                                      onTap: () => _openChatScreen(context, user.id, user.name),
-                                      child: Container(
-                                        padding: const EdgeInsets.all(12),
-                                        decoration: BoxDecoration(
-                                          color: hasUnreadMessages ? const Color(0xff7B3FD3).withOpacity(0.05) : Colors.white,
-                                          borderRadius: BorderRadius.circular(15),
-                                          border: hasUnreadMessages ? Border.all(color: const Color(0xff7B3FD3).withOpacity(0.3)) : null,
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: hasUnreadMessages
-                                                  ? const Color(0xff7B3FD3).withOpacity(0.15)
-                                                  : Colors.grey.withOpacity(0.2),
-                                              spreadRadius: hasUnreadMessages ? 3 : 2,
-                                              blurRadius: hasUnreadMessages ? 8 : 5,
-                                            ),
-                                          ],
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            Stack(
-                                              children: [
-                                                CircleAvatar(
-                                                  radius: 30,
-                                                  backgroundColor: const Color(0xff7B3FD3).withOpacity(0.2),
-                                                  backgroundImage: user.profilePictureUrl != null
-                                                      ? NetworkImage(user.profilePictureUrl!)
-                                                      : null,
-                                                  child: user.profilePictureUrl == null
-                                                      ? Text(
-                                                    user.name.isNotEmpty ? user.name[0].toUpperCase() : 'U',
-                                                    style: const TextStyle(
-                                                      color: Color(0xff7B3FD3),
-                                                      fontWeight: FontWeight.bold,
-                                                      fontSize: 18,
-                                                    ),
-                                                  )
-                                                      : null,
-                                                ),
-                                                Positioned(
-                                                  bottom: 0,
-                                                  right: 0,
-                                                  child: Container(
-                                                    width: 16,
-                                                    height: 16,
-                                                    decoration: BoxDecoration(
-                                                      color: user.isOnline ? Colors.green : Colors.grey,
-                                                      shape: BoxShape.circle,
-                                                      border: Border.all(color: Colors.white, width: 2),
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                            const SizedBox(width: 12),
-                                            Expanded(
-                                              child: Column(
-                                                crossAxisAlignment: CrossAxisAlignment.start,
-                                                children: [
-                                                  Row(
-                                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                                    children: [
-                                                      Expanded(
-                                                        child: Text(
-                                                          user.name,
-                                                          style: TextStyle(
-                                                            fontWeight: hasUnreadMessages ? FontWeight.bold : FontWeight.w600,
-                                                            fontSize: 16,
-                                                            color: hasUnreadMessages ? const Color(0xff7B3FD3) : Colors.black87,
-                                                          ),
-                                                          overflow: TextOverflow.ellipsis,
-                                                        ),
-                                                      ),
-                                                      if (lastMessageTime != null)
-                                                        Text(
-                                                          _formatLastMessageTime(lastMessageTime),
-                                                          style: TextStyle(
-                                                            color: hasUnreadMessages ? const Color(0xff7B3FD3) : Colors.grey,
-                                                            fontSize: 12,
-                                                            fontWeight: hasUnreadMessages ? FontWeight.w600 : FontWeight.normal,
-                                                          ),
-                                                        ),
-                                                    ],
-                                                  ),
-                                                  const SizedBox(height: 4),
-                                                  if (lastMessage.isNotEmpty)
-                                                    Row(
-                                                      children: [
-                                                        if (!isLastMessageFromPeer)
-                                                          Icon(Icons.reply, size: 14, color: Colors.grey[600]),
-                                                        if (!isLastMessageFromPeer) const SizedBox(width: 4),
-                                                        Expanded(
-                                                          child: Text(
-                                                            lastMessage,
-                                                            style: TextStyle(
-                                                              color: hasUnreadMessages ? Colors.black87 : Colors.grey[600],
-                                                              fontSize: 13,
-                                                              fontWeight: hasUnreadMessages ? FontWeight.w500 : FontWeight.normal,
-                                                            ),
-                                                            overflow: TextOverflow.ellipsis,
-                                                            maxLines: 1,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    )
-                                                  else
-                                                    Text(
-                                                      user.email,
-                                                      style: const TextStyle(
-                                                        color: Colors.grey,
-                                                        fontSize: 13,
-                                                      ),
-                                                      overflow: TextOverflow.ellipsis,
-                                                    ),
-                                                  const SizedBox(height: 2),
-                                                  Text(
-                                                    userProvider.getUserLastSeen(user.id),
-                                                    style: TextStyle(
-                                                      color: user.isOnline ? Colors.green : Colors.grey,
-                                                      fontSize: 12,
-                                                      fontWeight: FontWeight.w500,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            // Notification area
-                                            Column(
-                                              children: [
-                                                if (hasUnreadMessages)
-                                                  Container(
-                                                    padding: const EdgeInsets.all(6),
-                                                    decoration: const BoxDecoration(
-                                                      color: Color(0xff7B3FD3),
-                                                      shape: BoxShape.circle,
-                                                    ),
-                                                    child: Text(
-                                                      unreadCount > 99 ? '99+' : unreadCount.toString(),
-                                                      style: const TextStyle(
-                                                        color: Colors.white,
-                                                        fontSize: 12,
-                                                        fontWeight: FontWeight.bold,
-                                                      ),
-                                                    ),
-                                                  )
-                                                else if (user.isOnline)
-                                                  Container(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                                    decoration: BoxDecoration(
-                                                      color: Colors.green.withOpacity(0.1),
-                                                      borderRadius: BorderRadius.circular(12),
-                                                      border: Border.all(color: Colors.green.withOpacity(0.3)),
-                                                    ),
-                                                    child: const Row(
-                                                      mainAxisSize: MainAxisSize.min,
-                                                      children: [
-                                                        Icon(Icons.circle, size: 8, color: Colors.green),
-                                                        SizedBox(width: 4),
-                                                        Text(
-                                                          'Active',
-                                                          style: TextStyle(
-                                                            color: Colors.green,
-                                                            fontSize: 10,
-                                                            fontWeight: FontWeight.w600,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                if (hasUnreadMessages)
-                                                  const SizedBox(height: 8),
-                                                if (hasUnreadMessages)
-                                                  Container(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                                    decoration: BoxDecoration(
-                                                      color: Colors.orange.withOpacity(0.1),
-                                                      borderRadius: BorderRadius.circular(8),
-                                                      border: Border.all(color: Colors.orange.withOpacity(0.3)),
-                                                    ),
-                                                    child: const Text(
-                                                      'NEW',
-                                                      style: TextStyle(
-                                                        color: Colors.orange,
-                                                        fontSize: 8,
-                                                        fontWeight: FontWeight.bold,
-                                                      ),
-                                                    ),
-                                                  ),
-                                              ],
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                );
-                              },
-                            ),
-                          );
-                        },
-                      );
-                    },
+                  child: TabBarView(
+                    controller: _tabController,
+                    children: [
+                      // Chats Tab
+                      _buildChatsTab(currentUser, userProvider),
+                      // Groups Tab
+                      _buildGroupsTab(currentUser),
+                    ],
                   ),
                 ),
               ],
             );
           },
         ),
+        // Floating Action Button for creating groups
+        floatingActionButton: FloatingActionButton(
+          onPressed: _createNewGroup,
+          backgroundColor: const Color(0xff7B3FD3),
+          child: const Icon(Icons.group_add, color: Colors.white),
+        ),
       ),
+    );
+  }
+
+  Widget _buildChatsTab(User currentUser, UserProvider userProvider) {
+    return StreamBuilder<List<User>>(
+      stream: userProvider.getUsersStream(excludeUserId: currentUser.id),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(
+            child: CircularProgressIndicator(
+              color: Color(0xff7B3FD3),
+            ),
+          );
+        }
+
+        if (snapshot.hasError) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.error_outline, size: 64, color: Colors.grey[400]),
+                const SizedBox(height: 16),
+                Text(
+                  'Error loading users',
+                  style: TextStyle(fontSize: 16, color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton(
+                  onPressed: () => userProvider.refreshUsers(excludeUserId: currentUser.id),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          );
+        }
+
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return const Center(
+            child: Text(
+              'No other users found.\nSign up more accounts to see them here!',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 16, color: Colors.grey),
+            ),
+          );
+        }
+
+        // Filter users based on search query
+        final users = _searchQuery.isEmpty
+            ? snapshot.data!
+            : snapshot.data!.where((user) {
+          final userName = user.name.toLowerCase();
+          final userEmail = user.email.toLowerCase();
+          return userName.contains(_searchQuery) || userEmail.contains(_searchQuery);
+        }).toList();
+
+        if (users.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.search_off, size: 64, color: Colors.grey[400]),
+                const SizedBox(height: 16),
+                Text(
+                  'No users found for "$_searchQuery"',
+                  style: TextStyle(fontSize: 16, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return ListView.builder(
+          itemCount: users.length,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          itemBuilder: (context, index) {
+            final user = users[index];
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: StreamBuilder<Map<String, dynamic>?>(
+                stream: _getLastMessage(user.id, currentUser.id),
+                builder: (context, lastMessageSnapshot) {
+                  final lastMessageData = lastMessageSnapshot.data;
+                  final lastMessage = lastMessageData?['lastMessage'] as String? ?? '';
+                  final lastMessageTime = lastMessageData?['lastMessageTime'] as Timestamp?;
+                  final lastMessageSender = lastMessageData?['lastMessageSender'] as String?;
+                  final isLastMessageFromPeer = lastMessageSender == user.id;
+
+                  return StreamBuilder<int>(
+                    stream: _getUnreadCount(user.id, currentUser.id),
+                    builder: (context, unreadSnapshot) {
+                      final unreadCount = unreadSnapshot.data ?? 0;
+                      final hasUnreadMessages = unreadCount > 0;
+
+                      return GestureDetector(
+                        onTap: () => _openChatScreen(context, user.id, user.name),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: hasUnreadMessages ? const Color(0xff7B3FD3).withOpacity(0.05) : Colors.white,
+                            borderRadius: BorderRadius.circular(15),
+                            border: hasUnreadMessages ? Border.all(color: const Color(0xff7B3FD3).withOpacity(0.3)) : null,
+                            boxShadow: [
+                              BoxShadow(
+                                color: hasUnreadMessages
+                                    ? const Color(0xff7B3FD3).withOpacity(0.15)
+                                    : Colors.grey.withOpacity(0.2),
+                                spreadRadius: hasUnreadMessages ? 3 : 2,
+                                blurRadius: hasUnreadMessages ? 8 : 5,
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            children: [
+                              Stack(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 30,
+                                    backgroundColor: const Color(0xff7B3FD3).withOpacity(0.2),
+                                    backgroundImage: user.profilePictureUrl != null
+                                        ? NetworkImage(user.profilePictureUrl!)
+                                        : null,
+                                    child: user.profilePictureUrl == null
+                                        ? Text(
+                                      user.name.isNotEmpty ? user.name[0].toUpperCase() : 'U',
+                                      style: const TextStyle(
+                                        color: Color(0xff7B3FD3),
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 18,
+                                      ),
+                                    )
+                                        : null,
+                                  ),
+                                  Positioned(
+                                    bottom: 0,
+                                    right: 0,
+                                    child: Container(
+                                      width: 16,
+                                      height: 16,
+                                      decoration: BoxDecoration(
+                                        color: user.isOnline ? Colors.green : Colors.grey,
+                                        shape: BoxShape.circle,
+                                        border: Border.all(color: Colors.white, width: 2),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            user.name,
+                                            style: TextStyle(
+                                              fontWeight: hasUnreadMessages ? FontWeight.bold : FontWeight.w600,
+                                              fontSize: 16,
+                                              color: hasUnreadMessages ? const Color(0xff7B3FD3) : Colors.black87,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        if (lastMessageTime != null)
+                                          Text(
+                                            _formatLastMessageTime(lastMessageTime),
+                                            style: TextStyle(
+                                              color: hasUnreadMessages ? const Color(0xff7B3FD3) : Colors.grey,
+                                              fontSize: 12,
+                                              fontWeight: hasUnreadMessages ? FontWeight.w600 : FontWeight.normal,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    if (lastMessage.isNotEmpty)
+                                      Row(
+                                        children: [
+                                          if (!isLastMessageFromPeer)
+                                            Icon(Icons.reply, size: 14, color: Colors.grey[600]),
+                                          if (!isLastMessageFromPeer) const SizedBox(width: 4),
+                                          Expanded(
+                                            child: Text(
+                                              lastMessage,
+                                              style: TextStyle(
+                                                color: hasUnreadMessages ? Colors.black87 : Colors.grey[600],
+                                                fontSize: 13,
+                                                fontWeight: hasUnreadMessages ? FontWeight.w500 : FontWeight.normal,
+                                              ),
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                    else
+                                      Text(
+                                        user.email,
+                                        style: const TextStyle(
+                                          color: Colors.grey,
+                                          fontSize: 13,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      userProvider.getUserLastSeen(user.id),
+                                      style: TextStyle(
+                                        color: user.isOnline ? Colors.green : Colors.grey,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              // Notification area
+                              Column(
+                                children: [
+                                  if (hasUnreadMessages)
+                                    Container(
+                                      padding: const EdgeInsets.all(6),
+                                      decoration: const BoxDecoration(
+                                        color: Color(0xff7B3FD3),
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: Text(
+                                        unreadCount > 99 ? '99+' : unreadCount.toString(),
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    )
+                                  else if (user.isOnline)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: Colors.green.withOpacity(0.1),
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(color: Colors.green.withOpacity(0.3)),
+                                      ),
+                                      child: const Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(Icons.circle, size: 8, color: Colors.green),
+                                          SizedBox(width: 4),
+                                          Text(
+                                            'Active',
+                                            style: TextStyle(
+                                              color: Colors.green,
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  if (hasUnreadMessages)
+                                    const SizedBox(height: 8),
+                                  if (hasUnreadMessages)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange.withOpacity(0.1),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                                      ),
+                                      child: const Text(
+                                        'NEW',
+                                        style: TextStyle(
+                                          color: Colors.orange,
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildGroupsTab(User currentUser) {
+    return StreamBuilder<List<ChatConversation>>(
+      stream: _getGroupChats(currentUser.id),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(
+            child: CircularProgressIndicator(color: Color(0xff7B3FD3)),
+          );
+        }
+
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.group_off, size: 64, color: Colors.grey[400]),
+                const SizedBox(height: 16),
+                const Text(
+                  'No groups yet',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Create a group to start chatting',
+                  style: TextStyle(color: Colors.grey),
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton.icon(
+                  onPressed: _createNewGroup,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Create Group'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xff7B3FD3),
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        final groups = _searchQuery.isEmpty
+            ? snapshot.data!
+            : snapshot.data!.where((group) {
+          final groupName = (group.groupName ?? '').toLowerCase();
+          return groupName.contains(_searchQuery);
+        }).toList();
+
+        if (groups.isEmpty && _searchQuery.isNotEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.search_off, size: 64, color: Colors.grey[400]),
+                const SizedBox(height: 16),
+                Text(
+                  'No groups found for "$_searchQuery"',
+                  style: TextStyle(fontSize: 16, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return ListView.builder(
+          itemCount: groups.length,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          itemBuilder: (context, index) {
+            final group = groups[index];
+            final unreadCount = group.getUnreadCount(currentUser.id);
+            final hasUnreadMessages = unreadCount > 0;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: GestureDetector(
+                onTap: () => _openGroupChatScreen(context, group),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: hasUnreadMessages ? const Color(0xff7B3FD3).withOpacity(0.05) : Colors.white,
+                    borderRadius: BorderRadius.circular(15),
+                    border: hasUnreadMessages ? Border.all(color: const Color(0xff7B3FD3).withOpacity(0.3)) : null,
+                    boxShadow: [
+                      BoxShadow(
+                        color: hasUnreadMessages
+                            ? const Color(0xff7B3FD3).withOpacity(0.15)
+                            : Colors.grey.withOpacity(0.2),
+                        spreadRadius: hasUnreadMessages ? 3 : 2,
+                        blurRadius: hasUnreadMessages ? 8 : 5,
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      // Group Avatar
+                      CircleAvatar(
+                        radius: 30,
+                        backgroundColor: const Color(0xff7B3FD3).withOpacity(0.2),
+                        backgroundImage: group.groupImage != null
+                            ? NetworkImage(group.groupImage!)
+                            : null,
+                        child: group.groupImage == null
+                            ? const Icon(
+                          Icons.group,
+                          color: Color(0xff7B3FD3),
+                          size: 30,
+                        )
+                            : null,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    group.groupName ?? 'Group Chat',
+                                    style: TextStyle(
+                                      fontWeight: hasUnreadMessages ? FontWeight.bold : FontWeight.w600,
+                                      fontSize: 16,
+                                      color: hasUnreadMessages ? const Color(0xff7B3FD3) : Colors.black87,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                if (group.lastMessage?.timestamp != null)
+                                  Text(
+                                    _formatLastMessageTime(group.lastMessage!.timestamp),
+                                    style: TextStyle(
+                                      color: hasUnreadMessages ? const Color(0xff7B3FD3) : Colors.grey,
+                                      fontSize: 12,
+                                      fontWeight: hasUnreadMessages ? FontWeight.w600 : FontWeight.normal,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${group.participantIds.length} members',
+                              style: TextStyle(
+                                color: Colors.grey[600],
+                                fontSize: 12,
+                              ),
+                            ),
+                            if (group.lastMessage != null) ...[
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      group.lastMessage!.messageType == 'system'
+                                          ? group.lastMessage!.message
+                                          : '${group.lastMessage!.senderName ?? 'Someone'}: ${group.lastMessage!.message}',
+                                      style: TextStyle(
+                                        color: hasUnreadMessages ? Colors.black87 : Colors.grey[600],
+                                        fontSize: 13,
+                                        fontWeight: hasUnreadMessages ? FontWeight.w500 : FontWeight.normal,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      // Unread count and badges
+                      Column(
+                        children: [
+                          if (hasUnreadMessages)
+                            Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: const BoxDecoration(
+                                color: Color(0xff7B3FD3),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Text(
+                                unreadCount > 99 ? '99+' : unreadCount.toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          if (hasUnreadMessages)
+                            const SizedBox(height: 8),
+                          if (group.isAdmin(currentUser.id))
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.amber.withOpacity(0.3)),
+                              ),
+                              child: const Text(
+                                'ADMIN',
+                                style: TextStyle(
+                                  color: Colors.amber,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }

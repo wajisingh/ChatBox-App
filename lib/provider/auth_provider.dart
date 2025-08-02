@@ -27,7 +27,15 @@ class AuthProvider extends ChangeNotifier {
   void _initAuthListener() {
     _auth.authStateChanges().listen((firebase_auth.User? firebaseUser) async {
       if (firebaseUser != null) {
-        await _loadUserData(firebaseUser.uid);
+        // Try to load user by display name (which should be the cleaned name)
+        String? displayName = firebaseUser.displayName;
+        if (displayName != null) {
+          String cleanedName = User.cleanNameForId(displayName);
+          await _loadUserDataByName(cleanedName);
+        } else {
+          // Fallback: try to load by UID (for existing users)
+          await _loadUserData(firebaseUser.uid);
+        }
         _setAuthStatus(AuthStatus.authenticated);
       } else {
         _currentUser = null;
@@ -51,6 +59,22 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Load user data by name (new method)
+  Future<void> _loadUserDataByName(String userName) async {
+    try {
+      final doc = await _firestore.collection('users').doc(userName).get();
+      if (doc.exists) {
+        _currentUser = User.fromFirestore(doc);
+        // Update user online status
+        await _updateUserOnlineStatus(true);
+      }
+    } catch (e) {
+      print('Failed to load user data by name: ${e.toString()}');
+      _setError('Failed to load user data: ${e.toString()}');
+    }
+  }
+
+  // Keep old method for backward compatibility
   Future<void> _loadUserData(String userId) async {
     try {
       final doc = await _firestore.collection('users').doc(userId).get();
@@ -69,7 +93,7 @@ class AuthProvider extends ChangeNotifier {
       try {
         await _firestore.collection('users').doc(_currentUser!.id).update({
           'isOnline': isOnline,
-          'lastSeen': FieldValue.serverTimestamp(),
+          'lastSeen': isOnline ? null : FieldValue.serverTimestamp(),
         });
       } catch (e) {
         print('Error updating online status: $e');
@@ -77,6 +101,7 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
+  // CORRECTED SIGNUP METHOD - Uses name as document ID
   Future<bool> signUp({
     required String name,
     required String email,
@@ -86,22 +111,37 @@ class AuthProvider extends ChangeNotifier {
       _setLoading(true);
       _setError(null);
 
+      // 1. Check if username is already taken
+      if (await User.isNameTaken(name)) {
+        _setError('Username "$name" is already taken');
+        return false;
+      }
+
+      // 2. Create Firebase Auth account
       final credential = await _auth.createUserWithEmailAndPassword(
         email: email,
         password: password,
       );
 
       if (credential.user != null) {
-        // Create user document in Firestore
+        // 3. Use cleaned name as document ID (NOT Firebase Auth UID)
+        String userId = User.cleanNameForId(name); // "Hammad" -> "hammad"
+
+        // 4. Create user document with name as ID
         final user = User(
-          id: credential.user!.uid,
-          name: name,
+          id: userId,  // Use cleaned name as document ID
+          name: name,  // Original name
           email: email,
           isOnline: true,
           createdAt: Timestamp.now(),
         );
 
-        await _firestore.collection('users').doc(user.id).set(user.toMap());
+        // 5. Save to Firestore with name as document ID
+        await _firestore.collection('users').doc(userId).set(user.toMap());
+
+        // 6. Update Firebase Auth display name for future reference
+        await credential.user!.updateDisplayName(name);
+
         _currentUser = user;
         _setAuthStatus(AuthStatus.authenticated);
         return true;
@@ -123,26 +163,62 @@ class AuthProvider extends ChangeNotifier {
       _setLoading(true);
       _setError(null);
 
-      await _auth.signInWithEmailAndPassword(
+      // Step 1: Sign in with Firebase Auth
+      final credential = await _auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
+
+      final firebaseUser = credential.user;
+      if (firebaseUser == null) {
+        _setError("No Firebase user returned.");
+        return false;
+      }
+
+      // Step 2: Get user display name
+      final displayName = firebaseUser.displayName;
+      if (displayName == null || displayName.trim().isEmpty) {
+        _setError("No display name found for Firebase user.");
+        return false;
+      }
+
+      // Step 3: Fetch Firestore user using display name
+      final cleanId = User.cleanNameForId(displayName);
+      final snapshot = await _firestore.collection('users').doc(cleanId).get();
+
+      if (!snapshot.exists) {
+        _setError("User not found in Firestore.");
+        return false;
+      }
+
+      // Step 4: Parse and set user
+      _currentUser = User.fromFirestore(snapshot);
+      _setAuthStatus(AuthStatus.authenticated);
+
       return true;
     } catch (e) {
-      _setError(e.toString());
+      _setError("Login error: ${e.toString()}");
       return false;
     } finally {
       _setLoading(false);
     }
   }
 
+
   Future<void> signOut() async {
     try {
       _setLoading(true);
-      await _updateUserOnlineStatus(false);
+
+      // Update status in background (don't wait)
+      if (_currentUser != null) {
+        _updateUserOnlineStatus(false).catchError((_) {});
+      }
+
+      // Sign out immediately
       await _auth.signOut();
       _currentUser = null;
       _setAuthStatus(AuthStatus.unauthenticated);
+
     } catch (e) {
       _setError(e.toString());
     } finally {

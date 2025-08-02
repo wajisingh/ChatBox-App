@@ -1,6 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'message.dart';
-import 'user.dart';
 
 class ChatConversation {
   final String id;
@@ -8,7 +7,11 @@ class ChatConversation {
   final Message? lastMessage;
   final Map<String, int> unreadCounts;
   final Timestamp? updatedAt;
-  final User? otherUser; // For 1-on-1 chats
+  final Timestamp? createdAt;
+  final bool isGroup;
+  final String? groupName;
+  final String? groupImage;
+  final String? adminId;
 
   ChatConversation({
     required this.id,
@@ -16,7 +19,11 @@ class ChatConversation {
     this.lastMessage,
     this.unreadCounts = const {},
     this.updatedAt,
-    this.otherUser,
+    this.createdAt,
+    this.isGroup = false,
+    this.groupName,
+    this.groupImage,
+    this.adminId,
   });
 
   factory ChatConversation.fromFirestore(DocumentSnapshot doc) {
@@ -24,11 +31,14 @@ class ChatConversation {
     return ChatConversation(
       id: doc.id,
       participantIds: List<String>.from(data['participantIds'] ?? []),
-      lastMessage: data['lastMessage'] != null
-          ? Message.fromMap(data['lastMessage'], '')
-          : null,
+      lastMessage: data['lastMessage'] != null ? Message.fromMap(data['lastMessage'], '') : null,
       unreadCounts: Map<String, int>.from(data['unreadCounts'] ?? {}),
       updatedAt: data['updatedAt'] as Timestamp?,
+      createdAt: data['createdAt'] as Timestamp?,
+      isGroup: data['isGroup'] ?? false,
+      groupName: data['groupName'],
+      groupImage: data['groupImage'],
+      adminId: data['adminId'],
     );
   }
 
@@ -37,53 +47,80 @@ class ChatConversation {
       'participantIds': participantIds,
       'lastMessage': lastMessage?.toMap(),
       'unreadCounts': unreadCounts,
-      'updatedAt': updatedAt ?? FieldValue.serverTimestamp(),
+      'updatedAt': updatedAt,
+      'createdAt': createdAt,
+      'isGroup': isGroup,
+      'groupName': groupName,
+      'groupImage': groupImage,
+      'adminId': adminId,
     };
   }
 
-  ChatConversation copyWith({
-    String? id,
-    List<String>? participantIds,
-    Message? lastMessage,
-    Map<String, int>? unreadCounts,
-    Timestamp? updatedAt,
-    User? otherUser,
-  }) {
-    return ChatConversation(
-      id: id ?? this.id,
-      participantIds: participantIds ?? this.participantIds,
-      lastMessage: lastMessage ?? this.lastMessage,
-      unreadCounts: unreadCounts ?? this.unreadCounts,
-      updatedAt: updatedAt ?? this.updatedAt,
-      otherUser: otherUser ?? this.otherUser,
-    );
-  }
-
+  // Get unread count for user
   int getUnreadCount(String userId) {
     return unreadCounts[userId] ?? 0;
   }
 
-  bool hasUnreadMessages(String userId) {
-    return getUnreadCount(userId) > 0;
+  // Check if user is admin
+  bool isAdmin(String userId) {
+    return adminId == userId;
   }
 
-  String getOtherParticipantId(String currentUserId) {
-    return participantIds.firstWhere(
-          (id) => id != currentUserId,
-      orElse: () => '',
-    );
+  // Get other user ID in 1-on-1 chat
+  String getOtherUserId(String currentUserId) {
+    return participantIds.firstWhere((id) => id != currentUserId, orElse: () => '');
   }
 
-  bool isGroupChat() {
-    return participantIds.length > 2;
+  // Create 1-on-1 conversation
+  static Future<ChatConversation?> createChat(String user1Id, String user2Id) async {
+    try {
+      List<String> sortedIds = [user1Id, user2Id]..sort();
+      String chatId = '${sortedIds[0]}_${sortedIds[1]}';
+
+      ChatConversation chat = ChatConversation(
+        id: chatId,
+        participantIds: [user1Id, user2Id],
+        unreadCounts: {user1Id: 0, user2Id: 0},
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      );
+
+      await FirebaseFirestore.instance
+          .collection('conversations')
+          .doc(chatId)
+          .set(chat.toMap());
+
+      return chat;
+    } catch (e) {
+      return null;
+    }
   }
 
-  @override
-  bool operator ==(Object other) {
-    if (identical(this, other)) return true;
-    return other is ChatConversation && other.id == id;
+  // Get user's conversations
+  static Future<List<ChatConversation>> getUserChats(String userId) async {
+    try {
+      QuerySnapshot snapshot = await FirebaseFirestore.instance
+          .collection('conversations')
+          .where('participantIds', arrayContains: userId)
+          .orderBy('updatedAt', descending: true)
+          .get();
+
+      return snapshot.docs.map((doc) => ChatConversation.fromFirestore(doc)).toList();
+    } catch (e) {
+      return [];
+    }
   }
 
-  @override
-  int get hashCode => id.hashCode;
+  // Update last message
+  Future<bool> updateLastMessage(Message message) async {
+    try {
+      await FirebaseFirestore.instance.collection('conversations').doc(id).update({
+        'lastMessage': message.toMap(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
 }
